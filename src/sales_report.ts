@@ -11,13 +11,13 @@ export const runSalesReport = async () => {
     
     // Logic to select turn:
     // 13:00 run (hours 12-14) -> 08:00 to 13:00
-    // 18:00 run (hours 17-19) -> 13:00 to 18:00
+    // 18:00 run (hours 17-19) -> 08:00 to 18:00 (Total do Dia)
     let timeRange = { start: 8, end: 13 };
-    let timeLabel = `08:00 - 13:00`;
+    let timeLabel = `08:00 - 13:00 (Turno da Manhã)`;
 
     if (currentHour >= 16) { // Run at 18:00
-        timeRange = { start: 13, end: 18 };
-        timeLabel = `13:00 - 18:00`;
+        timeRange = { start: 8, end: 18 };
+        timeLabel = `08:00 - 18:00 (Total do Dia)`;
     }
 
     const salespersons = config.monitor.salespersons;
