@@ -22,9 +22,9 @@ const start = async () => {
             runSlaMonitor();
         });
 
-        // 4. Schedule sales report (13:00)
-        // Cron: '0 13 * * *' (Every day at 13h00)
-        const reportCron = '0 13 * * *';
+        // 4. Schedule sales report (13:00 and 18:00)
+        // Cron: '0 13,18 * * *' (Every day at 13h00 and 18h00)
+        const reportCron = '0 13,18 * * *';
         console.log(`Scheduling sales report job with cron expression: ${reportCron} (TZ: America/Sao_Paulo)`);
         cron.schedule(reportCron, () => {
              runSalesReport();
