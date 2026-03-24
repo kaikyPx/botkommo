@@ -1,0 +1,8 @@
+node_modules
+browser_profile
+screenshots
+.env
+dist
+.git
+.gemini
+*.log
