@@ -20,17 +20,48 @@ async function getPage(): Promise<any> {
     if (!context) {
         if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir);
         context = await require('playwright').chromium.launchPersistentContext(profileDir, {
-            headless: true, // Mantido headless por padrão, mude para false para visualizar
+            headless: true,
             viewport: { width: 1366, height: 1000 },
             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         });
     }
 
-    const pages = context.pages();
-    const page = pages.length > 0 ? pages[0] : await context.newPage();
-    page.removeAllListeners('console');
+    const page = await context.newPage();
     page.on('console', (msg: any) => console.log(`[Browser] ${msg.text()}`));
     return page;
+}
+
+/**
+ * Ensures the page is logged in to Kommo.
+ */
+async function ensureLoggedIn(page: any): Promise<void> {
+    const rootUrl = `https://${config.kommo.subdomain}.kommo.com/`;
+    console.log(`[Automation] Verificando autenticação em: ${rootUrl}`);
+    
+    await page.goto(rootUrl, { waitUntil: 'load' });
+    await page.waitForTimeout(5000); 
+    
+    const pageTitle = await page.title();
+    console.log(`[Automation] Título da página: "${pageTitle}"`);
+
+    if (pageTitle.includes('Authorization') || pageTitle.includes('Autorização')) {
+         console.log('[Automation] Tela de login detectada. Iniciando fluxo...');
+         
+         await page.waitForSelector('input[name="username"]', { timeout: 10000 }).catch(() => null);
+         const loginFormVisible = await page.$('input[name="username"]');
+         
+         if (loginFormVisible) {
+             console.log('[Automation] Preenchendo credenciais...');
+             await page.fill('input[name="username"]', config.kommo.automationLogin);
+             await page.fill('input[name="password"]', config.kommo.automationPassword);
+             await page.waitForTimeout(5000);
+             await page.click('button[type="submit"]');
+             console.log('[Automation] Login enviado. Aguardando...');
+             await page.waitForTimeout(15000);
+         }
+    } else {
+        console.log('[Automation] Sessão ativa. [OK]');
+    }
 }
 
 export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails> => {
@@ -38,51 +69,7 @@ export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails>
     const page = await getPage();
     
     try {
-        const rootUrl = `https://${config.kommo.subdomain}.kommo.com/`;
-        console.log(`[Automation] Passo 2.5: Acessando a raiz do CRM para verificar autenticação: ${rootUrl}`);
-        
-        await page.goto(rootUrl, { waitUntil: 'load' });
-        await page.waitForTimeout(5000); // Aguarda um momento para redirecionamentos
-        
-        const pageTitle = await page.title();
-        console.log(`[Automation] Título da página atual: "${pageTitle}"`);
-
-        // Verifica se o título da página indica que precisa de login
-        if (pageTitle.includes('Authorization') || pageTitle.includes('Autorização')) {
-             console.log('[Automation] Passo 3.1: Tela de Autorização detectada. Iniciando fluxo de login...');
-             
-             // Aguarda os campos estarem disponíveis
-             await page.waitForSelector('input[name="username"]', { timeout: 10000 }).catch(() => null);
-             
-             const loginFormVisible = await page.$('input[name="username"]');
-             
-             if (loginFormVisible) {
-                 console.log('[Automation] Preenchendo credenciais...');
-                 await page.fill('input[name="username"]', config.kommo.automationLogin);
-                 await page.fill('input[name="password"]', config.kommo.automationPassword);
-                 console.log('[Automation] Credenciais preenchidas. [OK]');
-                 
-                 console.log('[Automation] Aguardando 10 segundos antes de clicar em login...');
-                 await page.waitForTimeout(10000);
-                 
-                 await page.click('button[type="submit"]');
-                 console.log('[Automation] Login submetido. [OK]');
-                 
-                 console.log('[Automation] Aguardando 20 segundos para o painel carregar...');
-                 await page.waitForTimeout(20000);
-                 
-                  try {
-                     await page.waitForSelector('.nav__menu, .dashboard-wrapper', { timeout: 15000 });
-                     console.log('[Automation] Login concluído com sucesso e painel carregado. [OK]');
-                 } catch (e) {
-                     console.log('[Automation] Aviso: Seletor interno não encontrado após login, mas prosseguindo. [OK?]');
-                 }
-             } else {
-                 console.log('[Automation] ERRO: Título é Authorization mas formulário não encontrado!');
-             }
-        } else {
-            console.log('[Automation] Sessão já está ativa (Não está na tela de Authorization). [OK]');
-        }
+        await ensureLoggedIn(page);
 
         const leadUrl = `https://${config.kommo.subdomain}.kommo.com/leads/detail/${leadId}`;
         console.log(`[Automation] Passo 3: Navegando para a página do lead ${leadId}...`);
@@ -306,8 +293,7 @@ export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails>
             isContactMessage: false
         };
     } finally {
-        // Não fechamos a page para mantê-la viável se for a única do contexto, mas podemos navegar para about:blank
-        // await page.close(); 
+        await page.close().catch(() => null);
     }
 };
 
@@ -322,8 +308,12 @@ export const scrapeSalespersonLeads = async (salesperson: string, timeRange?: { 
     const page = await getPage();
     
     try {
+        await ensureLoggedIn(page);
+
         const subdomain = config.kommo.subdomain;
-        const searchUrl = `https://${subdomain}.kommo.com/chats/?filter%5Bterm%5D=${encodeURIComponent(salesperson)}`;
+        const searchUrl = salesperson 
+            ? `https://${subdomain}.kommo.com/chats/?filter%5Bterm%5D=${encodeURIComponent(salesperson)}`
+            : `https://${subdomain}.kommo.com/chats/`;
         
         console.log(`[Automation] Navigating to search URL: ${searchUrl}`);
         await page.goto(searchUrl, { waitUntil: 'load' });
@@ -416,6 +406,8 @@ export const scrapeSalespersonLeads = async (salesperson: string, timeRange?: { 
             count: 0,
             leadIds: []
         };
+    } finally {
+        await page.close().catch(() => null);
     }
 };
 
