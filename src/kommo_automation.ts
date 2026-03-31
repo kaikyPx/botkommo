@@ -12,30 +12,59 @@ interface ScrapedDetails {
 let context: any | null = null;
 
 const profileDir = path.join(process.cwd(), 'browser_profile');
+const screenshotsDir = path.join(process.cwd(), 'screenshots');
+if (!fs.existsSync(screenshotsDir)) fs.mkdirSync(screenshotsDir);
+
+async function takeScreenshot(page: any, name: string) {
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const fileName = `${timestamp}_${name}.png`;
+    const filePath = path.join(screenshotsDir, fileName);
+    try {
+        await page.screenshot({ path: filePath, fullPage: true });
+        console.log(`[Automation] Screenshot salva: ${fileName}`);
+    } catch (e: any) {
+        console.error(`[Automation] Erro ao salvar screenshot: ${e.message}`);
+    }
+}
 
 /**
  * Ensures browser is launched and logged in persistently.
  */
+let contextPromise: Promise<any> | null = null;
+
 async function getPage(): Promise<any> {
-    if (!context) {
-        if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir);
-        context = await require('playwright').chromium.launchPersistentContext(profileDir, {
-            headless: true,
-            viewport: { width: 1366, height: 1000 },
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        });
+    if (!contextPromise || (context && !context.browser()?.isConnected())) {
+        if (context) await context.close().catch(() => null);
+        contextPromise = (async () => {
+            if (!fs.existsSync(profileDir)) fs.mkdirSync(profileDir);
+            console.log('[Automation] Lançando novo contexto do navegador...');
+            const ctx = await require('playwright').chromium.launchPersistentContext(profileDir, {
+                headless: true,
+                viewport: { width: 1366, height: 1000 },
+                userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            });
+            context = ctx;
+            return ctx;
+        })();
     }
 
-    const page = await context.newPage();
-    page.on('console', (msg: any) => console.log(`[Browser] ${msg.text()}`));
-    return page;
+    const ctx = await contextPromise;
+    try {
+        const page = await ctx.newPage();
+        page.on('console', (msg: any) => console.log(`[Browser] ${msg.text()}`));
+        return page;
+    } catch (e) {
+        console.log('[Automation] Falha ao criar página (browser fechado?). Resetando contexto...');
+        contextPromise = null;
+        return getPage(); // Tenta novamente com novo contexto
+    }
 }
 
 /**
  * Ensures the page is logged in to Kommo.
  */
 async function ensureLoggedIn(page: any): Promise<void> {
-    const rootUrl = `https://${config.kommo.subdomain}.kommo.com/`;
+    const rootUrl = `https://${config.kommo.subdomain}.kommo.com/chats/`;
     console.log(`[Automation] Verificando autenticação em: ${rootUrl}`);
     
     await page.goto(rootUrl, { waitUntil: 'load' });
@@ -44,24 +73,35 @@ async function ensureLoggedIn(page: any): Promise<void> {
     const pageTitle = await page.title();
     console.log(`[Automation] Título da página: "${pageTitle}"`);
 
-    if (pageTitle.includes('Authorization') || pageTitle.includes('Autorização')) {
-         console.log('[Automation] Tela de login detectada. Iniciando fluxo...');
+    const isAuthorized = !pageTitle.includes('Authorization') && !pageTitle.includes('Autorização');
+    const hasNav = await page.$('.notification-list, .nav, .dashboard-wrapper');
+
+    if (!isAuthorized || !hasNav) {
+         console.log('[Automation] Sessão expirada ou redirecionada. Iniciando fluxo de login...');
+         
+         if (!page.url().includes('login')) {
+             await page.goto(`https://${config.kommo.subdomain}.kommo.com/chats/`, { waitUntil: 'load' });
+         }
          
          await page.waitForSelector('input[name="username"]', { timeout: 10000 }).catch(() => null);
          const loginFormVisible = await page.$('input[name="username"]');
          
          if (loginFormVisible) {
              console.log('[Automation] Preenchendo credenciais...');
+             await page.waitForSelector('input[name="username"]', { timeout: 10000 });
              await page.fill('input[name="username"]', config.kommo.automationLogin);
+             await page.waitForTimeout(1000);
+             await page.waitForSelector('input[name="password"]', { timeout: 10000 });
              await page.fill('input[name="password"]', config.kommo.automationPassword);
-             await page.waitForTimeout(5000);
+             await page.waitForTimeout(2000);
              await page.click('button[type="submit"]');
              console.log('[Automation] Login enviado. Aguardando...');
-             await page.waitForTimeout(15000);
+             await page.waitForTimeout(20000); // 20 segundos para carregar o painel
          }
     } else {
         console.log('[Automation] Sessão ativa. [OK]');
     }
+    await takeScreenshot(page, 'logged_in_check');
 }
 
 export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails> => {
@@ -76,10 +116,12 @@ export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails>
         await page.goto(leadUrl, { waitUntil: 'load' });
         
         console.log(`[Automation] URL do Lead carregada. [OK]`);
+        await takeScreenshot(page, `lead_${leadId}_loaded`);
         
         console.log('[Automation] Passo 4: Interação: Página do lead acessada. Aguardando 20 segundos para renderização... [OK]');
         await page.waitForTimeout(20000); // 20 segundos
         console.log('[Automation] Renderização concluída após pausa. [OK]');
+        await takeScreenshot(page, `lead_${leadId}_after_wait`);
 
         // --- CLEAN MODALS ---
         await page.evaluate(() => {
@@ -104,7 +146,7 @@ export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails>
         
         await page.evaluate(() => {
             // Tenta múltiplas divs que podem ser o scroller do Kommo
-            const scrollers = document.querySelectorAll('.notes-wrapper__scroller, .feed__notes, .js-feed-notes-wrapper, .linked-form__notes-wrapper');
+            const scrollers = document.querySelectorAll('.notes-wrapper__scroller, .feed__notes, .js-feed-notes-wrapper, .linked-form__notes-wrapper, .feed-compose__scroller');
             scrollers.forEach((scroller: any) => {
                 scroller.scrollTop = scroller.scrollHeight; // Primeiro desce tudo para ancorar
             });
@@ -140,12 +182,16 @@ export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails>
 
             console.log(`[Automation] Interação: Scroll para cima ${i+1}. Aguardando 15 segundos... [OK]`);
             await page.waitForTimeout(15000);
+            await takeScreenshot(page, `lead_${leadId}_scroll_${i+1}`);
         }
         console.log('[Automation] Fluxo de scroll completado. [OK]');
+        await takeScreenshot(page, `lead_${leadId}_final_scroll_state`);
 
         // --- EXTRACT DATA ---
         const salespersonsList = config.monitor.salespersons;
-        const data = await page.evaluate((salespersons: string[]) => {
+        const ignoredMessagesList = config.sla.ignoredMessages;
+
+        const data = await page.evaluate((salespersons: string[], ignoredMsgs: string[]) => {
             // Pega exatamente os containers raiz de cada mensagem, sem pegar elementos internos ou filhos fragmentados
             const noteElements = Array.from(document.querySelectorAll('.js-note, .feed-note-wrapper'))
                 .filter(el => !el.classList.contains('feed-composed') && !el.closest('.feed-composed'));
@@ -185,101 +231,108 @@ export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails>
                 }
 
                 // Nova regra: Ignorar mensagens curtas de confirmação do cliente
-                const cleanText = contentText.toLowerCase().replace(/[^\w\s]/g, '').trim();
-                const ignoredWordsRegex = /^(ok|blz|beleza|tranquilo|certo|sim|podemos|obrigado|obrigada|obg|valeu|vlw|tchau|ate logo|ate mais|fechado|joia|show|perfeito|ta bom|ta otimo|isso)$/i;
-                if (cleanText.length > 0 && cleanText.length < 15 && ignoredWordsRegex.test(cleanText)) {
+                const hasQuestionMark = contentText.includes('?');
+                const cleanText = contentText.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w\s]/g, '').trim();
+                
+                // Lista dinâmica vinda do .env (ignorar encerramentos)
+                const ignoredPatterns = ignoredMsgs.map(m => m.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()).join('|');
+                const ignoredWordsRegex = new RegExp(`^(${ignoredPatterns})$`, 'i');
+                
+                if (!hasQuestionMark && cleanText.length > 0 && cleanText.length < 35 && ignoredWordsRegex.test(cleanText)) {
                     console.log(`[Browser] Skipping Note[${i}]: Mensagem curta ignoravel ("${contentText}")`);
                     continue;
                 }
 
-                if (contentText || isAudio || isImage) {
-                    if (contentText) {
-                        lastMsg = contentText;
-                    } else if (isAudio) {
-                        lastMsg = '(Mensagem de Áudio)';
-                    } else if (isImage) {
-                        lastMsg = '(Imagem/Arquivo)';
-                    }
-                    
-                    const isIncomingClass = note.classList.contains('feed-note--left') || 
-                                     note.classList.contains('feed-note-incoming') ||
-                                     note.querySelector('.feed-note-incoming') !== null;
-                    
-                    const isOutgoingClass = note.classList.contains('feed-note--right') || 
-                                     note.classList.contains('feed-composed') || 
-                                     (!isIncomingClass && note.classList.contains('feed-note-external')) ||
-                                     (!isIncomingClass && note.classList.contains('feed-note'));
-
-                    const authorEl = note.querySelector('.feed-note__amojo-user, .feed-note__author, .feed-note-v2__author');
-                    const authorName = authorEl?.textContent?.trim().toLowerCase() || '';
-
-                    const dateEl = note.querySelector('.js-feed-note__date, .feed-note__date, .feed-note-v2__date');
-                    const dateText = dateEl?.textContent?.trim().toLowerCase() || '';
-                    
-                    let timestamp = Date.now() / 1000;
-                    const timeMatch = dateText.match(/(\d{1,2}):(\d{2})/);
-                    if (timeMatch) {
-                        const msgDate = new Date();
-                        msgDate.setHours(parseInt(timeMatch[1], 10), parseInt(timeMatch[2], 10), 0, 0);
-                        if (dateText.includes('ontem')) {
-                            msgDate.setDate(msgDate.getDate() - 1);
+                    if (contentText || isAudio || isImage) {
+                        if (contentText) {
+                            lastMsg = contentText;
+                        } else if (isAudio) {
+                            lastMsg = '(Mensagem de Áudio)';
+                        } else if (isImage) {
+                            lastMsg = '(Imagem/Arquivo)';
                         }
-                        timestamp = Math.floor(msgDate.getTime() / 1000);
-                    }
+                        
+                        const dateEl = note.querySelector('.js-feed-note__date, .feed-note__date, .feed-note-v2__date');
+                        const dateText = dateEl?.textContent?.trim().toLowerCase() || '';
+                        
+                        let timestamp = Date.now() / 1000;
+                        const timeMatch = dateText.match(/(\d{1,2}):(\d{2})/);
+                        if (timeMatch) {
+                            const msgDate = new Date();
+                            msgDate.setHours(parseInt(timeMatch[1], 10), parseInt(timeMatch[2], 10), 0, 0);
+                            
+                            if (dateText.includes('ontem')) {
+                                msgDate.setDate(msgDate.getDate() - 1);
+                            } else if (dateText.match(/\d{2}\.\d{2}\.\d{4}/)) {
+                                const datePart = dateText.match(/(\d{2})\.(\d{2})\.(\d{4})/);
+                                if (datePart) {
+                                    msgDate.setFullYear(parseInt(datePart[3]), parseInt(datePart[2]) - 1, parseInt(datePart[1]));
+                                }
+                            } else if (dateText.match(/\d{2}\.\d{2}/) && !dateText.includes('hoje')) {
+                                const dayMonth = dateText.match(/(\d{2})\.(\d{2})/);
+                                if (dayMonth) {
+                                    msgDate.setMonth(parseInt(dayMonth[2]) - 1, parseInt(dayMonth[1]));
+                                }
+                            }
+                            timestamp = Math.floor(msgDate.getTime() / 1000);
+                        }
 
-                    const isBotOrWaba = authorName.includes('whatsapp') || authorName.includes('bot');
-                    const isKnownSalesperson = salespersons.some(name => authorName.includes(name.toLowerCase()));
-
-                    if (isBotOrWaba || isKnownSalesperson) {
-                        isContactMessage = false; 
-                        console.log(`[Browser] Assigned Salesperson: Author is bot/WABA or known (${authorName})`);
-                    } else if (isIncomingClass) {
-                        isContactMessage = true;
-                        console.log(`[Browser] Assigned Contact: Has incoming classes`);
-                    } else if (isOutgoingClass) {
-                        isContactMessage = false;
-                        console.log(`[Browser] Assigned Salesperson: Has outgoing classes`);
-                    } else {
-                        isContactMessage = false; 
-                        console.log(`[Browser] Assigned Salesperson: Fallback chosen`);
-                    }
-
-                    // Save the calculated timestamp onto a variable outside the loop
-                    (window as any).__lastMsgTs = timestamp;
-                    break;
-                }
-            }
-
-            // 2. Scan history for salesperson name (fallback)
-            const patterns = [
-                /me chamo ([\wÀ-ÿ]+)/i, 
-                /aqui quem fala [ée] [oa]?\s*([\wÀ-ÿ]+)/i, 
-                /meu nome [ée] ([\wÀ-ÿ]+)/i, 
-                /sou o ([\wÀ-ÿ]+)/i, 
-                /sou a ([\wÀ-ÿ]+)/i
-            ];
-            for (const note of notes) {
-                const text = note.textContent || '';
-                for (const p of patterns) {
-                    const m = text.match(p);
-                    if (m && m[1] && m[1].trim().length < 20) {
-                        detectedName = m[1].trim().split(' ')[0];
+                        const isIncomingClass = note.classList.contains('feed-note--left') || 
+                                         note.classList.contains('feed-note-incoming') ||
+                                         note.querySelector('.feed-note-incoming') !== null;
+                        
+                        isContactMessage = isIncomingClass;
+                        (window as any).__lastMsgTs = timestamp;
                         break;
                     }
                 }
-                if (detectedName) break;
-            }
 
-            const owner = document.querySelector('.linked-form__field-value_owner, [data-id="responsible_user_id"] .control-content')?.textContent?.trim() || 'Desconhecido';
-            
-            return {
-                lastMessage: lastMsg,
-                salespersonName: detectedName || owner,
-                isContactMessage,
-                lastMessageTimestamp: (window as any).__lastMsgTs || (Date.now() / 1000)
-            };
-        }, salespersonsList);
-        console.log('[Automation] Passo 7: Extração profunda de dados concluída. [OK]');
+                // 2. Scan history for salesperson name (regex) OR author name
+                let lastSalespersonAuthor = '';
+                const namePatterns = [
+                    /me chamo ([\wÀ-ÿ]+)/i, 
+                    /aqui quem fala [ée] [oa]?\s*([\wÀ-ÿ]+)/i, 
+                    /meu nome [ée] ([\wÀ-ÿ]+)/i, 
+                    /sou o ([\wÀ-ÿ]+)/i, 
+                    /sou a ([\wÀ-ÿ]+)/i
+                ];
+
+                for (const note of notes) {
+                    const authorEl = note.querySelector('.feed-note__amojo-user, .feed-note__author, .feed-note-v2__author');
+                    const authorName = authorEl?.textContent?.trim().toLowerCase() || '';
+                    const isIncoming = note.classList.contains('feed-note--left') || note.classList.contains('feed-note-incoming');
+                    
+                    // Regex strategy
+                    if (!detectedName) {
+                        const text = note.textContent || '';
+                        for (const p of namePatterns) {
+                            const m = text.match(p);
+                            if (m && m[1] && m[1].trim().length < 20) {
+                                detectedName = m[1].trim().split(' ')[0];
+                                break;
+                            }
+                        }
+                    }
+
+                    // Author name strategy
+                    if (!isIncoming && !lastSalespersonAuthor) {
+                        const match = salespersons.find(name => authorName.includes(name.toLowerCase()));
+                        if (match) lastSalespersonAuthor = match;
+                    }
+                    
+                    if (detectedName && lastSalespersonAuthor) break;
+                }
+
+                const owner = document.querySelector('.linked-form__field-value_owner, [data-id="responsible_user_id"] .control-content')?.textContent?.trim() || 'Desconhecido';
+                
+                return {
+                    lastMessage: lastMsg,
+                    salespersonName: lastSalespersonAuthor || detectedName || owner,
+                    isContactMessage,
+                    lastMessageTimestamp: (window as any).__lastMsgTs || (Date.now() / 1000)
+                };
+            }, salespersonsList, ignoredMessagesList);
+            console.log('[Automation] Passo 7: Extração profunda de dados concluída. [OK]');
 
         return {
             ...data
@@ -298,114 +351,116 @@ export const scrapeLeadDetails = async (leadId: number): Promise<ScrapedDetails>
 };
 
 /**
- * Scrapes lead IDs for a specific salesman by performing a chat search.
- * Filters for "Today" and optionally within a specific time range (e.g., 08:00 - 12:00).
+ * Fetches lead IDs for a specific salesperson via the Kommo inbox API.
+ *
+ * Uses a logged-in browser session (persistent profile) to access the
+ * authenticated /ajax/v4/inbox/list endpoint and filters leads by
+ * found_message.created_at within the given BRT hour range on TODAY.
+ *
+ * @param salesperson  Name to search (exact match used in Kommo query)
+ * @param startHourBRT Start of time window, inclusive (e.g. 0 = 00:00 BRT)
+ * @param endHourBRT   End of time window, exclusive   (e.g. 13 = 13:00 BRT)
  */
-export const scrapeSalespersonLeads = async (salesperson: string, timeRange?: { start: number, end: number }) => {
-    console.log(`[Automation] Searching for leads filtered by salesperson keyword: "${salesperson}"...`);
-    if (timeRange) console.log(`[Automation] Target time range: ${timeRange.start}:00 - ${timeRange.end}:00`);
-    
+export const scrapeSalespersonLeads = async (
+    salesperson: string,
+    timeRange?: { start: number; end: number }
+) => {
+    const startHour = timeRange?.start ?? 0;
+    const endHour   = timeRange?.end   ?? 24;
+
+    console.log(`[API] Buscando "${salesperson}" | BRT ${String(startHour).padStart(2,'0')}:00 – ${String(endHour).padStart(2,'0')}:00`);
+
     const page = await getPage();
-    
+
     try {
         await ensureLoggedIn(page);
 
+        // ── Build today's BRT window as UTC unix timestamps ────────────────
+        const BRT_OFFSET_S = -3 * 60 * 60;                      // -10800 s
+        const nowUtcMs     = Date.now();
+        const nowBRTMs     = nowUtcMs + BRT_OFFSET_S * 1000;
+        const brtMidnight  = new Date(nowBRTMs);
+        brtMidnight.setUTCHours(0, 0, 0, 0);
+
+        // Convert BRT midnight back to UTC unix seconds
+        const brtMidnightUtcS = (brtMidnight.getTime() / 1000) - BRT_OFFSET_S;
+
+        const windowStartUtcS = brtMidnightUtcS + startHour * 3600;
+        const windowEndUtcS   = brtMidnightUtcS + endHour   * 3600;
+        // ──────────────────────────────────────────────────────────────────
+
         const subdomain = config.kommo.subdomain;
-        const searchUrl = salesperson 
-            ? `https://${subdomain}.kommo.com/chats/?filter%5Bterm%5D=${encodeURIComponent(salesperson)}`
-            : `https://${subdomain}.kommo.com/chats/`;
-        
-        console.log(`[Automation] Navigating to search URL: ${searchUrl}`);
-        await page.goto(searchUrl, { waitUntil: 'load' });
-        
-        // Wait for results to be visible
-        console.log(`[Automation] Waiting for results to appear...`);
+        const apiUrl = `https://${subdomain}.kommo.com/ajax/v4/inbox/list?limit=250&query%5Bmessage%5D=${encodeURIComponent(salesperson)}`;
+
+        console.log(`[API] GET ${apiUrl}`);
+        await page.goto(apiUrl, { waitUntil: 'load', timeout: 60000 });
+        const content = await page.evaluate(() => document.body.innerText);
+
+        let data: any;
         try {
-            await page.waitForSelector('.notification__item', { timeout: 15000 });
-        } catch (e) {
-            console.log(`[Automation] Warning: No notification items appeared within 15s for "${salesperson}".`);
+            data = JSON.parse(content);
+        } catch {
+            throw new Error('[API] Resposta não é JSON válido.');
         }
-        
-        // Extract lead IDs with scroll and time range filtering
-        console.log(`[Automation] Extracting leads with infinite scroll...`);
-        
-        const leads = await page.evaluate(async (range: { start: number, end: number } | undefined) => {
-            const collected = new Set<string>();
-            let reachedYesterday = false;
-            let lastItemCount = 0;
-            let attemptsWithoutNew = 0;
-            
-            const scroller = document.querySelector('.custom-scroll.a2965e40f') || 
-                             document.querySelector('.notification-list__scroller') || 
-                             document.querySelector('.custom-scroll') || 
-                             document.documentElement;
 
-            for (let i = 0; i < 30; i++) { 
-                const items = Array.from(document.querySelectorAll('.notification__item'));
-                console.log(`[Browser] Step ${i}: Found ${items.length} items.`);
+        const allTalks: any[] = data?._embedded?.talks ?? [];
+        console.log(`[API] ${allTalks.length} registros recebidos.`);
 
-                if (items.length > 0 && items.length === lastItemCount) {
-                    attemptsWithoutNew++;
-                } else {
-                    attemptsWithoutNew = 0;
-                    lastItemCount = items.length;
-                }
 
-                for (const item of items) {
-                    const dateMsg = item.querySelector('.notification-inner__data_message')?.textContent || '';
-                    const isToday = dateMsg.toLowerCase().includes('hoje');
-                    
-                    if (isToday) {
-                        let isInRange = true;
-                        if (range) {
-                            const match = dateMsg.match(/(\d{1,2}):(\d{2})/);
-                            if (match) {
-                                const h = parseInt(match[1]);
-                                isInRange = h >= range.start && h < range.end;
-                            }
-                        }
+        // ── Filter & deduplicate ───────────────────────────────────────────
+        const uniqueIds = new Set<string>();
+        const results: { id: string; snippet: string; time: string; clientName: string; fonte: string }[] = [];
 
-                        if (isInRange) {
-                            const a = item.querySelector('a.js-navigate-link');
-                            const href = a?.getAttribute('href') || '';
-                            const match = href.match(/\/leads\/detail\/(\d+)/);
-                            if (match && match[1]) collected.add(match[1]);
-                        }
-                    } else if (dateMsg.includes('Ontem') || dateMsg.match(/\d{2}\.\d{2}/)) {
-                        reachedYesterday = true;
-                    }
-                }
+        for (const talk of allTalks) {
+            // Only process leads (not contacts)
+            if (talk.entity?.type !== 'leads') continue;
 
-                if (reachedYesterday) break;
-                if (items.length > 0 && attemptsWithoutNew >= 4) break;
+            const leadId = talk.entity?.id?.toString();
+            if (!leadId || uniqueIds.has(leadId)) continue;
 
-                if (scroller && scroller !== document.documentElement) {
-                    scroller.scrollTop += 2000;
-                } else {
-                    window.scrollBy(0, 1500);
-                }
+            // Use found_message.created_at — this is when the salesperson
+            // was first assigned / greeted the client in the chat
+            const msgTs: number = talk.found_message?.created_at ?? 0;
+            if (!msgTs) continue;
 
-                await new Promise(r => setTimeout(r, 3000));
-            }
+            // Is this message within today's BRT window?
+            if (msgTs < windowStartUtcS || msgTs >= windowEndUtcS) continue;
 
-            return Array.from(collected);
-        }, timeRange);
-        
-        console.log(`[Automation] Found ${leads.length} leads in range for "${salesperson}".`);
-        
+            uniqueIds.add(leadId);
+
+            // Format time in BRT for display
+            const brtDate = new Date((msgTs + BRT_OFFSET_S) * 1000);
+            const timeStr =
+                String(brtDate.getUTCHours()).padStart(2, '0') + ':' +
+                String(brtDate.getUTCMinutes()).padStart(2, '0');
+
+            const clientName  = talk.contact?.name || 'Desconhecido';
+            const snippet      = talk.found_message?.text || talk.last_message?.text || '';
+            const chatSource   = talk.chat_source === 'instagram_business' ? 'Instagram' : 'WhatsApp';
+
+            results.push({ id: leadId, snippet, time: timeStr, clientName, fonte: chatSource });
+            console.log(`[LEAD] ${salesperson} | #${leadId} | ${clientName} | ${timeStr} | ${chatSource}`);
+        }
+
+        // Sort chronologically (oldest → newest)
+        results.sort((a, b) => {
+            const [ha, ma] = a.time.split(':').map(Number);
+            const [hb, mb] = b.time.split(':').map(Number);
+            return ha * 60 + ma - (hb * 60 + mb);
+        });
+
+        console.log(`[API] Concluído: ${results.length} leads únicos para "${salesperson}" no período.`);
+
         return {
             salesperson,
-            count: leads.length,
-            leadIds: leads
+            count: results.length,
+            leadIds: results.map(r => r.id),
+            leads: results
         };
-        
+
     } catch (error: any) {
-        console.error(`[Automation] Error scraping leads for "${salesperson}":`, error.message);
-        return {
-            salesperson,
-            count: 0,
-            leadIds: []
-        };
+        console.error(`[Automation] Erro ao buscar "${salesperson}":`, error.message);
+        return { salesperson, count: 0, leadIds: [], leads: [] };
     } finally {
         await page.close().catch(() => null);
     }

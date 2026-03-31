@@ -36,10 +36,10 @@ export const runSlaMonitor = async () => {
         const leads = await kommo.getActiveLeads();
         console.log(`[Monitor] Found ${leads.length} active leads to check.`);
 
-        const now = Math.floor(Date.now() / 1000);
         const thresholdSeconds = config.sla.thresholdMinutes * 60;
 
         for (let i = 0; i < leads.length; i++) {
+            const now = Math.floor(Date.now() / 1000); // 👈 Atualizado aqui para cada lead
             const lead = leads[i];
             const lastActivity = new Date(lead.updated_at * 1000).toLocaleString('pt-BR');
             console.log(`\n[Monitor] [${i + 1}/${leads.length}] Verificando Lead ID: ${lead.id} (${lead.name}) - Última Atividade: ${lastActivity}`);
@@ -72,26 +72,34 @@ export const runSlaMonitor = async () => {
                              const alreadyAlerted = await db.isLeadAlerted(lead.id, lead.updated_at);
                              
                              if (!alreadyAlerted) {
-                                 console.log(`   - ALERTA: Mensagem do CLIENTE via browser detectada e tempo excedido (${waitTimeMinutes} min)! Enviando p/ n8n.`);
-                                 
-                                 const leadUrl = `https://${config.kommo.subdomain}.kommo.com/leads/detail/${lead.id}`;
-                                 await sendN8nAlert({
-                                    leadId: lead.id,
-                                    leadName: lead.name,
-                                    waitTimeMinutes: waitTimeMinutes, 
-                                    salespersonName: scraped.salespersonName,
-                                    lastMessage: scraped.lastMessage,
-                                    leadUrl
-                                });
-                                await db.markLeadAsAlerted(lead.id, lead.updated_at);
-                                console.log(`   - SUCESSO: Alerta enviado (via Navegador). Tempo estimado: ${waitTimeMinutes}min.`);
+                                  const msgTimeStr = new Date((scraped.lastMessageTimestamp || lead.updated_at) * 1000).toLocaleTimeString('pt-BR');
+                                  const nowTimeStr = new Date().toLocaleTimeString('pt-BR');
+
+                                  console.log(`   - ALERTA: Mensagem do CLIENTE via browser detectada e tempo excedido (${waitTimeMinutes} min)! Enviando p/ n8n.`);
+                                  console.log(`      ↳ Hora da Mensagem: ${msgTimeStr} | Hora Atual: ${nowTimeStr}`);
+                                  
+                                  const leadUrl = `https://${config.kommo.subdomain}.kommo.com/leads/detail/${lead.id}`;
+                                  await sendN8nAlert({
+                                     leadId: lead.id,
+                                     leadName: lead.name,
+                                     waitTimeMinutes: waitTimeMinutes, 
+                                     salespersonName: scraped.salespersonName,
+                                     lastMessage: scraped.lastMessage,
+                                     leadUrl
+                                 });
+                                 await db.markLeadAsAlerted(lead.id, lead.updated_at);
+                                 console.log(`   - SUCESSO: Alerta enviado (via Navegador). Tempo estimado: ${waitTimeMinutes}min.`);
                              } else {
                                  console.log(`   - IGNORADO: Já enviamos alerta para esta mensagem (ou nas últimas 2h).`);
                              }
                          } else {
+                             const msgTimeStr = new Date((scraped.lastMessageTimestamp || lead.updated_at) * 1000).toLocaleTimeString('pt-BR');
+                             const nowTimeStr = new Date().toLocaleTimeString('pt-BR');
+
                              console.log(`   - DENTRO DO PRAZO: Mensagem não respondida, mas está no prazo para tolerância.`);
                              console.log(`      ↳ Mensagem do Cliente: "${scraped.lastMessage}"`);
                              console.log(`      ↳ Vendedor Assumido: ${scraped.salespersonName}`);
+                             console.log(`      ↳ Hora da Mensagem: ${msgTimeStr} | Hora Atual: ${nowTimeStr}`);
                              console.log(`      ↳ Tempo de Espera: ${waitTimeMinutes} min (de ${config.sla.thresholdMinutes} permitidos).`);
                          }
                     } else {
@@ -107,10 +115,14 @@ export const runSlaMonitor = async () => {
                 // Check who sent the last message
                 if (authorType === 'contact') {
                     // Nova regra: Ignorar mensagens curtas que são apenas concordâncias ou encerramentos
-                    const cleanText = latestMessage.text.toLowerCase().replace(/[^\w\s]/g, '').trim();
-                    const ignoredWordsRegex = /^(ok|blz|beleza|tranquilo|certo|sim|podemos|obrigado|obrigada|obg|valeu|vlw|tchau|ate logo|ate mais|fechado|joia|show|perfeito|ta bom|ta otimo|isso)$/i;
+                    const hasQuestionMark = latestMessage.text.includes('?');
+                    const cleanText = latestMessage.text.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w\s]/g, '').trim();
                     
-                    if (cleanText.length > 0 && cleanText.length < 15 && ignoredWordsRegex.test(cleanText)) {
+                    // Lista dinâmica vinda do .env (ignorar encerramentos)
+                    const ignoredPatterns = config.sla.ignoredMessages.map(m => m.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()).join('|');
+                    const ignoredWordsRegex = new RegExp(`^(${ignoredPatterns})$`, 'i');
+                    
+                    if (!hasQuestionMark && cleanText.length > 0 && cleanText.length < 35 && ignoredWordsRegex.test(cleanText)) {
                         console.log(`   - OK: A última mensagem do cliente foi uma concordância curta ("${latestMessage.text}"). Ignorando SLA.`);
                         await db.clearLeadAlert(lead.id);
                         continue;
@@ -120,7 +132,11 @@ export const runSlaMonitor = async () => {
                     const waitTimeSeconds = now - latestMessage.created_at;
                     const waitTimeMinutes = Math.round(waitTimeSeconds / 60);
 
+                    const msgTimeStr = new Date(latestMessage.created_at * 1000).toLocaleTimeString('pt-BR');
+                    const nowTimeStr = new Date().toLocaleTimeString('pt-BR');
+
                     console.log(`   - ÚLTIMA MENSAGEM: Do CLIENTE há ${waitTimeMinutes} minutos.`);
+                    console.log(`      ↳ Hora da Mensagem: ${msgTimeStr} | Hora Atual: ${nowTimeStr} | Espera Reais: ${waitTimeSeconds} seg.`);
 
                     if (waitTimeSeconds > thresholdSeconds) {
                         const alreadyAlerted = await db.isLeadAlerted(lead.id, latestMessage.created_at);
@@ -150,6 +166,7 @@ export const runSlaMonitor = async () => {
                         }
                     } else {
                         console.log(`   - DENTRO DO PRAZO: Aguardando mais ${config.sla.thresholdMinutes - waitTimeMinutes} minutos antes de alertar. [OK]`);
+                        console.log(`      ↳ Hora da Mensagem: ${msgTimeStr} | Hora Atual: ${nowTimeStr}`);
                     }
                 } else {
                     console.log(`   - OK: A última mensagem foi do VENDEDOR. SLA zerado. [OK]`);

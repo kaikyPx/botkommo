@@ -23,6 +23,10 @@ export const config = {
     },
     sla: {
         thresholdMinutes: parseInt(getEnvData('SLA_THRESHOLD_MINUTES', false) || '120', 10),
+        ignoredMessages: getEnvData('SLA_IGNORED_MESSAGES', false)
+            .split(',')
+            .map(s => s.trim())
+            .filter(s => s !== '')
     },
     n8n: {
         webhookUrl: getEnvData('N8N_WEBHOOK_URL', false)

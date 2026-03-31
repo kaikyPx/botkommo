@@ -14,6 +14,11 @@ function logToFile(msg: string) {
 }
 
 const start = async () => {
+    const now = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+    console.log(`================================================`);
+    console.log(`INICIANDO SERVIÇO ÀS: ${now}`);
+    console.log(`================================================`);
+    
     console.log('Starting Kommo SLA Monitor service...');
 
     try {
@@ -21,27 +26,39 @@ const start = async () => {
         await initDb();
         console.log('SQLite tracking DB initialized.');
 
-        // 2. Run once immediately
-        await runSlaMonitor();
-
-        // 3. Schedule cron job
-        // Runs every 5 minutes: '*/5 * * * *'
+        // 2. Schedule crons BEFORE initial blocking runs
+        
+        // SLA monitor every 5 mins
         const monitorCron = '*/5 * * * *';
         logToFile(`Scheduling monitor job with cron expression: ${monitorCron}`);
         cron.schedule(monitorCron, () => {
             runSlaMonitor().catch((e: any) => logToFile(`[Fatal Error] Monitor failed: ${e.message}`));
         });
 
-        // 4. Schedule sales report (13:00 and 18:00)
-        // Cron: '0 13,18 * * *' (Every day at 13h00 and 18h00)
-        const reportCron = '0 13,18 * * *';
-        logToFile(`Scheduling sales report job with cron expression: ${reportCron} (TZ: America/Sao_Paulo)`);
-        cron.schedule(reportCron, () => {
-             logToFile(`Triggering Sales Report job at 18:00 slot...`);
-             runSalesReport().catch((e: any) => logToFile(`[Fatal Error] Sales Report failed: ${e.message}`));
-        }, {
-            timezone: "America/Sao_Paulo"
+        // Sales report (13:00, 18:00)
+        const reportCron13 = '0 13 * * *';
+        const reportCron18 = '0 18 * * *';
+        
+        logToFile(`Scheduling sales report job for 13:00 with cron: ${reportCron13}`);
+        cron.schedule(reportCron13, () => {
+             logToFile(`Triggering 13:00 Sales Report job...`);
+             runSalesReport('13h').catch((e: any) => logToFile(`[Fatal Error] 13:00 Sales Report failed: ${e.message}`));
         });
+
+        logToFile(`Scheduling sales report job for 18:00 with cron: ${reportCron18}`);
+        cron.schedule(reportCron18, () => {
+             logToFile(`Triggering 18:00 Sales Report job...`);
+             runSalesReport('18h').catch((e: any) => logToFile(`[Fatal Error] 18:00 Sales Report failed: ${e.message}`));
+        });
+
+        // Heartbeat to check if cron is running
+        cron.schedule('* * * * *', () => {
+             logToFile(`HEARTBEAT - Cron scheduler is active and event loop is healthy.`);
+        });
+
+        // 3. Run initial monitoring once (non-blocking to ensure crons are not delayed by event loop)
+        console.log('[Monitor] Starting FIRST immediate run (async)...');
+        runSlaMonitor().catch((e: any) => logToFile(`[Fatal Error] Initial Monitor failed: ${e.message}`));
 
     } catch (error) {
         console.error('Failed to start service:', error);
